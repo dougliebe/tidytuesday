@@ -1,0 +1,207 @@
+---
+title: "TidyTemplate"
+date: 2022-03-16
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# TidyTuesday
+
+Join the R4DS Online Learning Community in the weekly #TidyTuesday event!
+Every week we post a raw dataset, a chart or article related to that dataset, and ask you to explore the data.
+While the dataset will be “tamed”, it will not always be tidy! As such you might need to apply various R for Data Science techniques to wrangle the data into a true tidy format.
+The goal of TidyTuesday is to apply your R skills, get feedback, explore other’s work, and connect with the greater #RStats community!
+As such we encourage everyone of all skills to participate!
+
+```{r setup, include=FALSE}
+
+
+library(tidyverse)
+library(tidytuesdayR)
+library(lubridate)
+# library(ggfortify)
+library(ggtext)
+
+base_path = here::here("2022","11")
+
+
+```
+
+# Load the weekly Data
+
+Download the weekly data and make available in the `tt` object.
+
+```{r Load}
+
+tt <- tt_load("2022-03-15")
+
+
+```
+
+
+# Readme
+
+Take a look at the readme for the weekly data to get insight on the dataset.
+This includes a data dictionary, source, and a link to an article on the data.
+
+```{r Readme, eval = interactive()}
+
+## sep the two datasets out
+
+cran <- tt$cran
+bioc <- tt$bioc
+
+```
+
+
+# Glimpse Data
+
+Take an initial look at the format of the data available.
+
+```{r Glimpse}
+
+tt %>% 
+  map(glimpse)
+
+```
+
+# Wrangle
+
+The glaring issue with the dataset is in the `cran` table. The dates are clearly in different formats. Let's try to get those looking nice. 
+
+```{r Wrangle}
+
+## using @geokaramanis method for cleanign dates
+cran %>% 
+    mutate(version_dot = str_replace_all(version, "-", ".")) %>% 
+  filter(date != 0) %>% 
+  mutate(
+    date_ymd_utc = parse_date(date, format = c("%Y-%m-%d %H:%M:%S UTC")),
+    date_ymd_cdt = parse_date(date, format = c("%Y-%m-%d %H:%M:%OS CDT")),
+    date_dmy = parse_date(date, format = c("%a %b %d %H:%M:%S %Y")),
+    date_ymd = parse_date(date, format = c("%Y-%m-%d"))
+  ) %>% 
+  pivot_longer(starts_with("date_"), values_to = "date_short") %>%
+  # remove one package ("PIN") that has date in 1987:
+  filter(date_short > "2000-12-31") %>% 
+  select(-name) %>% 
+  group_by(package) %>% 
+  arrange(date_short) %>% 
+  mutate(package_idx = cur_group_id()) %>% 
+  arrange(package_idx) %>% 
+  mutate(
+    version_idx = row_number(),
+    days_since_start = as.numeric(date_short - date_short[1]),
+    days_since_last_update = as.numeric(date_short - lag(date_short)),
+    days_to_today = as.numeric(Sys.Date()- date_short),
+  ) %>% 
+  ungroup() ->
+  cran_clean
+
+cran_clean %>% 
+  group_by(package) %>% 
+  ## get rid of packages updated in the last year
+  filter(!any(days_to_today < 365*2)) %>% 
+  replace_na(list(days_since_last_update = 0)) %>% 
+  mutate(will_there_be_update = 1:n() != n()) %>% 
+  ungroup() %>% 
+  mutate(time_bin = cut(days_since_start, breaks = seq(0, 365*2, 30),right = F)) %>% 
+  group_by(time_bin) %>% 
+  mutate(last_update = mean(!will_there_be_update), n = n(),
+            min_time = min(days_since_start)) ->
+  surv_data
+
+
+
+## grab two examples
+
+surv_data %>% 
+  filter(min_time == 0, !will_there_be_update, package == "Bhat") ->
+  zero_ex
+
+surv_data %>% 
+  filter(between(min_time, 300, 500), !will_there_be_update, package == "ggplot")  ->
+  mid_ex
+
+```
+
+
+# Visualize
+
+My thought is to look for the "Lindy Effect" in the version updates of packages. From Wikipedia:  
+
+> The Lindy effect (also known as Lindy's Law[1]) is a theorized phenomenon by which the future life expectancy of some non-perishable things, like a technology or an idea, is proportional to their current age.  
+
+
+
+```{r Visualize}
+
+# Annotations
+plot_titles <- list(
+  title = "Getting started is the hardest part",
+  subtitle = "Each dot is 50 package updates based on the package's lifespan at the time.<br>While packages slowly stop being updated, the most likely **last** update is the **first** update.",
+  caption = "
+  **Source:** Robert Flight (@rmflight) | **Visualization:** Doug Liebe (@dougliebe)"
+)
+
+jitter <- position_jitter( height = 0.01, width = 10)
+jitter2 <- position_jitter( height = 0.01, width = 10)
+surv_data %>% 
+  group_by(time_bin) %>% 
+  mutate(n = round(n()/50)) %>% 
+  sample_n(n[1]) %>% 
+  ggplot()+
+  geom_jitter(aes(min_time, last_update, color = n), alpha = 0.5, height = 0.01, width = 10)+
+  geom_jitter(data = zero_ex, aes(min_time, last_update), color = "black", position = jitter, size =3)+
+  geom_jitter(data = mid_ex, aes(min_time, last_update), color = "red", position = jitter2, size =3)+
+  scale_color_viridis_c()+
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1))+
+  labs(
+    x = "Days Since First Version Published",
+    y = "Will this be the last update?",
+    title = plot_titles$title,
+    subtitle = plot_titles$subtitle,
+    caption = plot_titles$caption
+  )+
+  theme_minimal()+
+  theme(
+    legend.position = 'none',
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 32, margin = margin( b = 1)),
+    plot.title.position = "plot",
+    plot.subtitle = element_markdown(
+      size = 18, margin = margin(t = 4, b = 8),lineheight = 0
+    ),
+    plot.caption = element_markdown(
+      margin = margin(t = 8), size = 16, color = "grey30"),
+    axis.text = element_text(size =16),
+    axis.title = element_text(size = 18),
+    text = element_text(color = "grey4", lineheight = 1.25),
+    
+    plot.margin = margin(t = 8, b = 4, l = 8, r = 18)
+  )+
+  ## annotations
+  annotate("label", x = 20, y = 0.243,
+           label = "{Bhat} published on 2006-02-08, no updates", hjust = 0, size = 4) +
+  annotate("label", x = 450, y = 0.154, color = 'red',
+           label = "{ggplot} last update was 2007-07-09 after 460d", hjust = 0, size = 4) +
+  annotate("label", x = 700, y = 0.23, 
+           label = "4,437 packages have been updated for 2+ years", hjust = 'right', size = 4) 
+  
+  
+
+  
+```
+
+# Save Image
+
+Save your image for sharing. Be sure to use the `#TidyTuesday` hashtag in your post on twitter! 
+
+```{r}
+
+# This will save your most recent plot
+ggsave(here::here(base_path, "cran_updates.png"), width = 5, height = 3)
+
+```
